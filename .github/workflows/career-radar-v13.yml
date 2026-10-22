@@ -1,0 +1,70 @@
+name: Career Radar V13 Daily
+
+on:
+  schedule:
+    - cron: '0 23 * * *' # 08:00 KST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry_run or live'
+        type: choice
+        required: true
+        default: dry_run
+        options:
+          - dry_run
+          - live
+
+permissions:
+  contents: write
+
+concurrency:
+  group: career-radar-v13
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check V13 syntax
+        run: python -m py_compile career_radar_v13.py
+
+      - name: Search and notify
+        env:
+          RADAR_MODE: ${{ github.event_name == 'schedule' && 'live' || inputs.mode }}
+          NAVER_MAIL_USER: ${{ secrets.NAVER_MAIL_USER }}
+          NAVER_MAIL_PASSWORD: ${{ secrets.NAVER_MAIL_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python career_radar_v13.py
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: career-radar-v13-report
+          path: |
+            career_radar_report.json
+            career_radar_preview.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Commit sent history
+        if: success() && (github.event_name == 'schedule' || inputs.mode == 'live')
+        run: |
+          if [ -f data/seen_jobs.json ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add data/seen_jobs.json
+            git diff --cached --quiet || (git commit -m 'Update V13 sent jobs' && git push)
+          fi
