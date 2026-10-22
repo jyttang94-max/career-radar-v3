@@ -1,0 +1,99 @@
+
+name: Career Radar V3 Verification Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_url:
+        description: "공식 채용공고 상세페이지 URL"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check Python syntax
+        run: python -m py_compile verify_v3.py
+
+      - name: Verify official job posting
+        env:
+          JOB_URL: ${{ inputs.job_url }}
+        run: |
+          python verify_v3.py "$JOB_URL" > verification-result.json
+
+      - name: Generate verification summary
+        if: success()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          with open("verification-result.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          lines = [
+              "# Career Radar V3 검증 결과",
+              "",
+              f"원문: {data['source_url']}",
+              f"상태: {data['status']}",
+              "",
+              "## 서류 접수 기간",
+              "",
+          ]
+
+          application = data["application"]
+          for key in ("start", "deadline", "deadline_time"):
+              lines.append(f"- {key}: {application.get(key) or '미추출'}")
+
+          lines.extend(["", "## 채용 정보", ""])
+
+          for key, value in data["details"].items():
+              lines.extend([
+                  f"### {key}",
+                  value or "미추출",
+                  "",
+              ])
+
+          lines.extend([
+              "## 검증 현황",
+              "",
+              f"- 누락 항목: {', '.join(data['missing_fields']) or '없음'}",
+              f"- 처리 문서: {len(data['documents'])}개",
+              f"- 첨부파일 오류 및 미지원: {len(data['errors'])}건",
+              "",
+              "자동 추출 결과로, 공식 원문 대조가 필요합니다.",
+          ])
+
+          with open(
+              os.environ["GITHUB_STEP_SUMMARY"],
+              "a",
+              encoding="utf-8"
+          ) as f:
+              f.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload verification result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-result
+          path: verification-result.json
+          if-no-files-found: warn
+          retention-days: 7
