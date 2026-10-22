@@ -1,0 +1,211 @@
+
+name: Career Radar V3 Source Diagnosis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: |
+          pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Diagnose official posting
+        run: |
+          cat > /tmp/diagnose.py <<'PY'
+          import json
+          import re
+          import requests
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+          from playwright.sync_api import sync_playwright
+
+          BASE = "https://www.dkuh.co.kr"
+          DETAIL = (
+              BASE + "/board5/bbs/board?"
+              "bo_table=01_03_05&wr_id=13557"
+          )
+          LIST = (
+              BASE + "/board5/bbs/board.php?"
+              "bo_table=01_03_05"
+          )
+          TITLE = "2026학년도 정규직(신규) 사무원"
+
+          def inspect(html, url):
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              images = []
+              frames = []
+
+              for a in soup.select("a[href]"):
+                  href = urljoin(url, a["href"])
+                  label = a.get_text(" ", strip=True)
+                  if re.search(
+                      r"첨부|다운로드|지원|공고|pdf|hwp|file|download",
+                      label + " " + href, re.I
+                  ):
+                      links.append({
+                          "text": label[:150],
+                          "url": href
+                      })
+
+              for img in soup.select("img"):
+                  images.append({
+                      "src": urljoin(
+                          url, img.get("src", "")
+                      ),
+                      "alt": img.get("alt", ""),
+                      "width": img.get("width"),
+                      "height": img.get("height")
+                  })
+
+              for frame in soup.select("iframe, embed, object"):
+                  frames.append({
+                      "tag": frame.name,
+                      "src": frame.get("src")
+                             or frame.get("data")
+                  })
+
+              text = soup.get_text("\n", strip=True)
+              return {
+                  "title": (
+                      soup.title.get_text(" ", strip=True)
+                      if soup.title else None
+                  ),
+                  "text_length": len(text),
+                  "text_excerpt": text[:5000],
+                  "links": links[:60],
+                  "images": images[:80],
+                  "frames": frames[:30],
+                  "background_images": re.findall(
+                      r"background(?:-image)?\s*:"
+                      r"[^;]{0,300}",
+                      html, re.I
+                  )[:30],
+              }
+
+          result = {"target": DETAIL}
+
+          for name, url in [
+              ("detail_http", DETAIL),
+              ("listing_http", LIST)
+          ]:
+              try:
+                  response = requests.get(
+                      url, timeout=30,
+                      headers={
+                          "User-Agent": "Mozilla/5.0"
+                      }
+                  )
+                  response.raise_for_status()
+                  data = inspect(
+                      response.text, response.url
+                  )
+                  data["status_code"] = response.status_code
+                  data["final_url"] = response.url
+
+                  if name == "listing_http":
+                      rows = BeautifulSoup(
+                          response.text, "html.parser"
+                      ).select("tr")
+                      data["matching_rows"] = [
+                          row.get_text(" ", strip=True)
+                          for row in rows
+                          if TITLE in row.get_text(
+                              " ", strip=True
+                          )
+                      ]
+
+                  result[name] = data
+              except Exception as exc:
+                  result[name] = {
+                      "error": str(exc)
+                  }
+
+          try:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(
+                      headless=True
+                  )
+                  page = browser.new_page(
+                      viewport={
+                          "width": 1440,
+                          "height": 1000
+                      }
+                  )
+                  page.goto(
+                      DETAIL,
+                      wait_until="domcontentloaded",
+                      timeout=45000
+                  )
+                  page.wait_for_timeout(3000)
+
+                  result["detail_browser"] = inspect(
+                      page.content(), page.url
+                  )
+                  result["detail_browser"]["visible_text"] = (
+                      page.locator("body").inner_text(
+                          timeout=10000
+                      )[:5000]
+                  )
+
+                  page.screenshot(
+                      path="diagnosis-screenshot.png",
+                      full_page=True
+                  )
+                  browser.close()
+          except Exception as exc:
+              result["detail_browser"] = {
+                  "error": str(exc)
+              }
+
+          with open(
+              "diagnosis-result.json", "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  result, f, ensure_ascii=False,
+                  indent=2
+              )
+
+          print("=== DIAGNOSIS ===")
+          for name, data in result.items():
+              if not isinstance(data, dict):
+                  continue
+              print(name)
+              print("Error:", data.get("error"))
+              print("Text length:", data.get("text_length"))
+              print("Images:", len(data.get("images", [])))
+              print("Frames:", len(data.get("frames", [])))
+              print("Links:", len(data.get("links", [])))
+              print("Matching rows:", data.get("matching_rows"))
+
+          print("Diagnostic artifacts generated.")
+          PY
+
+          python /tmp/diagnose.py
+
+      - name: Upload diagnostic files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: career-v3-source-diagnosis
+          path: |
+            diagnosis-result.json
+            diagnosis-screenshot.png
+          if-no-files-found: warn
+          retention-days: 3
