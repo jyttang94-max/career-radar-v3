@@ -1,0 +1,220 @@
+
+name: Career Radar V3 OCR Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ocr-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install Korean OCR
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            tesseract-ocr \
+            tesseract-ocr-kor \
+            tesseract-ocr-eng
+          python -m pip install \
+            requests beautifulsoup4 pillow
+
+      - name: Download posting and analyze images
+        run: |
+          cat > /tmp/ocr_test.py <<'PY'
+          import io
+          import json
+          import re
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          from urllib.parse import urljoin
+
+          import requests
+          from bs4 import BeautifulSoup
+          from PIL import Image, ImageOps, ImageEnhance
+
+          URL = (
+              "https://www.dkuh.co.kr/board5/bbs/board?"
+              "bo_table=01_03_05&wr_id=13557"
+          )
+
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": "Mozilla/5.0"
+          })
+
+          response = session.get(URL, timeout=30)
+          response.raise_for_status()
+          soup = BeautifulSoup(
+              response.content, "html.parser"
+          )
+
+          images = []
+          for img in soup.select("img[src]"):
+              src = urljoin(
+                  response.url, img["src"]
+              )
+              if "/board5/data/editor/" in src:
+                  if src not in images:
+                      images.append(src)
+
+          result = {
+              "posting_url": URL,
+              "image_count": len(images),
+              "images": [],
+          }
+
+          for index, src in enumerate(images, 1):
+              item = {
+                  "source": src,
+                  "status": "pending"
+              }
+
+              try:
+                  r = session.get(
+                      src,
+                      timeout=30,
+                      headers={"Referer": URL}
+                  )
+                  r.raise_for_status()
+
+                  original = Image.open(
+                      io.BytesIO(r.content)
+                  ).convert("RGB")
+
+                  # Upscale small image text for OCR
+                  scale = max(
+                      1, 2400 // original.width
+                  )
+                  enlarged = original.resize(
+                      (
+                          original.width * scale,
+                          original.height * scale
+                      ),
+                      Image.Resampling.LANCZOS
+                  )
+                  gray = ImageOps.grayscale(
+                      enlarged
+                  )
+                  enhanced = ImageEnhance.Contrast(
+                      gray
+                  ).enhance(1.6)
+
+                  with tempfile.TemporaryDirectory() as tmp:
+                      path = Path(tmp) / "page.png"
+                      enhanced.save(path)
+
+                      proc = subprocess.run(
+                          [
+                              "tesseract",
+                              str(path),
+                              "stdout",
+                              "-l", "kor+eng",
+                              "--psm", "3"
+                          ],
+                          capture_output=True,
+                          text=True,
+                          timeout=90
+                      )
+
+                  if proc.returncode != 0:
+                      raise RuntimeError(
+                          proc.stderr[:500]
+                      )
+
+                  text = proc.stdout.strip()
+
+                  item.update({
+                      "status": (
+                          "ocr_extracted"
+                          if len(text) >= 50
+                          else "insufficient_text"
+                      ),
+                      "image_size": list(
+                          original.size
+                      ),
+                      "characters": len(text),
+                      "ocr_text": text,
+                  })
+
+              except Exception as exc:
+                  item.update({
+                      "status": "failed",
+                      "error": str(exc)
+                  })
+
+              result["images"].append(item)
+
+          combined = "\n\n".join(
+              item.get("ocr_text", "")
+              for item in result["images"]
+          )
+
+          keywords = [
+              "사무원", "담당업무",
+              "지원자격", "응시자격",
+              "우대사항", "접수기간",
+              "근무지", "정규직"
+          ]
+
+          result["keyword_checks"] = {
+              key: key in combined
+              for key in keywords
+          }
+
+          Path("ocr-result.json").write_text(
+              json.dumps(
+                  result,
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+
+          print("=== OCR DIAGNOSTICS ===")
+          print("Images:", len(images))
+          for item in result["images"]:
+              print(
+                  "Image status:",
+                  item["status"],
+                  "Characters:",
+                  item.get("characters", 0)
+              )
+              print(
+                  item.get("ocr_text", "")[:6000]
+              )
+
+          print(
+              "Keyword checks:",
+              result["keyword_checks"]
+          )
+
+          if not images:
+              raise SystemExit(
+                  "FAIL: No posting images found"
+              )
+
+          if not any(
+              item["status"] == "ocr_extracted"
+              for item in result["images"]
+          ):
+              raise SystemExit(
+                  "FAIL: OCR extraction unsuccessful"
+              )
+          PY
+
+          python /tmp/ocr_test.py
+
+      - name: Upload OCR result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: career-v3-ocr-result
+          path: ocr-result.json
+          if-no-files-found: warn
+          retention-days: 7
