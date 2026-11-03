@@ -14,6 +14,9 @@ QUERIES=[
  '2026 정규직 산학협력단 연구행정 채용','2026 정규직 기업재단 경영지원 채용',
  '2026 정규직 문화재단 사무국 채용','2026 정규직 미술관 박물관 기획 채용',
  '2026 정규직 공공기관 학술 연구지원 채용 서울 경기','2026 정규직 전환형 대외협력 기획 채용',
+ '2026 기업재단 사무국 사업기획 채용','2026 재단법인 학술 연구지원 채용',
+ '2026 CSR 사회공헌 ESG 커뮤니티 채용 서울 경기','2026 웰니스 스포츠 브랜드 커뮤니티 파트너십 채용',
+ '2026 문화예술재단 장학재단 운영지원 채용','2026 대학병원 연구지원 행정 계약직 채용',
  '2026 독취사 정규직 교직원 채용','2026 공준모 정규직 재단 채용',
  '2026 고려대학교 정규직 행정직 채용','2026 삼성문화재단 정규직 채용',
  '2026 분당서울대학교병원 정규직 사무직 채용','2026 한국예술인복지재단 정규직 채용']
@@ -50,9 +53,17 @@ def extract(url,title):
   for node in soup.select('script,style,nav,footer'):node.decompose()
   text=soup.get_text(' ',strip=True)
  text=re.sub(r'\s+',' ',text)[:25000]
- if not ROLE.search(title) or not REGION.search(text):return None
- # Mixed permanent/contract postings are not safe to auto-classify.
- if not PERM.search(title) or TEMP.search(title):return None
+ if not ROLE.search(title):return None
+ if not REGION.search(text):return None
+ # Employment types are metadata, not exclusion criteria.
+ employment='고용형태 확인 필요'
+ title_head=text[:5000]
+ if re.search('무기계약직',title+' '+title_head):employment='무기계약직'
+ elif re.search('정규직 전환형|정규직전환',title+' '+title_head):employment='정규직 전환형'
+ elif re.search('정규직',title):employment='정규직'
+ elif re.search('계약직|기간제',title):employment='계약직'
+ elif re.search('인턴',title):employment='인턴'
+ elif re.search('정규직',title_head) and not re.search('계약직|기간제',title_head):employment='정규직 (본문 기준)'
  candidates=[]
  for label in re.finditer('접수기간|접수마감|원서접수|지원기간|마감일',text):
   fragment=text[label.start():label.start()+180]
@@ -66,12 +77,12 @@ def extract(url,title):
  if not candidates:return None
  lm=re.search(r'근무지역|근무지|근무장소',text)
  loc=text[lm.end():lm.end()+65].strip(' :：') if lm else None
- if not loc or not REGION.search(loc):return None
+ if not loc or not REGION.search(loc):loc='서울/경기 (본문 확인, 상세 근무지 검증 필요)'
  qm=re.search('지원자격|응시자격|자격요건',text)
  qual=text[qm.end():qm.end()+110].strip(' :：') if qm else None
- if not qual or len(qual)<8:return None
+ if not qual or len(qual)<8:qual='지원자격 원문 확인 필요'
  inst=re.split('채용|모집|2026|정규직',title)[0].strip(' []-:|')[:40] or title[:40]
- return dict(institution=inst,employment='정규직 전환형' if '전환' in title else '정규직',location=loc[:55],deadline=min(candidates).isoformat(),job=title[:75],qualification=qual,url=r.url)
+ return dict(institution=inst,employment=employment,location=loc[:55],deadline=min(candidates).isoformat(),job=title[:75],qualification=qual,url=r.url)
 
 def email_html(items):
  esc=lambda x:html.escape(str(x),quote=True)
@@ -104,7 +115,7 @@ def main():
    job=extract(url,title)
    if job:job['key']=key;jobs.append(job)
   except Exception as e:errors.append({'url':url,'error':str(e)[:120]})
- Path('career_radar_report.json').write_text(json.dumps({'date':str(today),'searched':len(QUERIES),'candidates':len(hits),'jobs':jobs,'errors':errors},ensure_ascii=False,indent=2),encoding='utf-8')
+ Path('career_radar_report.json').write_text(json.dumps({'date':str(today),'searched':len(QUERIES),'candidates':len(hits),'jobs':jobs,'errors':errors,'warning':'Search engine discovery is not exhaustive; official application status requires verification.'},ensure_ascii=False,indent=2),encoding='utf-8')
  mode=os.environ.get('RADAR_MODE','dry_run')
  if mode=='dry_run':
   Path('career_radar_preview.html').write_text(email_html(jobs),encoding='utf-8');print('DRY_RUN',len(jobs));return
