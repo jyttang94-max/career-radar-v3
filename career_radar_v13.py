@@ -31,16 +31,21 @@ def get(url):
  r=S.get(url,timeout=18);r.raise_for_status();return r
 
 def search():
- hits={};errors=[]
+ hits={};errors=[];audits=[]
  for q in QUERIES:
   url='https://www.bing.com/search?format=rss&q='+quote(q)
   try:
    root=ET.fromstring(get(url).content)
-   for x in root.findall('.//item'):
+   if root.tag.lower() != 'rss':raise ValueError('Expected RSS search response')
+   items=root.findall('./channel/item')
+   matched=0
+   for x in items:
     title=(x.findtext('title') or '').strip();link=(x.findtext('link') or '').strip()
-    if title and link and ROLE.search(title):hits.setdefault(link,title)
+    if title and link.startswith(('https://','http://')) and ROLE.search(title):
+     hits.setdefault(link,title);matched+=1
+   audits.append({'query':q,'raw_hits':len(items),'matched_hits':matched})
   except Exception as e:errors.append({'query':q,'error':str(e)[:120]})
- return hits,errors
+ return hits,errors,audits
 
 def extract(url,title):
  r=get(url)
@@ -107,7 +112,8 @@ def send(items):
 def main():
  try:seen=json.loads(STATE.read_text(encoding='utf-8'))
  except (FileNotFoundError,json.JSONDecodeError):seen={}
- hits,errors=search();jobs=[]
+ hits,errors,audits=search();jobs=[]
+ search_errors=list(errors)
  for url,title in hits.items():
   key=hashlib.sha256(url.encode()).hexdigest()[:24]
   if key in seen:continue
@@ -115,10 +121,17 @@ def main():
    job=extract(url,title)
    if job:job['key']=key;jobs.append(job)
   except Exception as e:errors.append({'url':url,'error':str(e)[:120]})
- Path('career_radar_report.json').write_text(json.dumps({'date':str(today),'searched':len(QUERIES),'candidates':len(hits),'jobs':jobs,'errors':errors,'warning':'Search engine discovery is not exhaustive; official application status requires verification.'},ensure_ascii=False,indent=2),encoding='utf-8')
+ health='ok'
+ if len(search_errors)==len(QUERIES):health='search_failed'
+ elif not hits:health='no_candidates'
+ elif errors:health='partial_failure'
+ Path('career_radar_report.json').write_text(json.dumps({'date':str(today),'searched':len(QUERIES),'candidates':len(hits),'jobs':jobs,'search_audits':audits,'errors':errors,'health':health,'warning':'Search engine discovery is not exhaustive; official application status requires verification.'},ensure_ascii=False,indent=2),encoding='utf-8')
  mode=os.environ.get('RADAR_MODE','dry_run')
  if mode=='dry_run':
-  Path('career_radar_preview.html').write_text(email_html(jobs),encoding='utf-8');print('DRY_RUN',len(jobs));return
+  Path('career_radar_preview.html').write_text(email_html(jobs),encoding='utf-8');print('DRY_RUN',len(jobs),'HEALTH',health)
+  if health!='ok':raise RuntimeError('Collection incomplete: '+health+'; inspect career_radar_report.json')
+  return
+ if health!='ok':raise RuntimeError('Collection incomplete: '+health+'; notification withheld; inspect career_radar_report.json')
  if jobs:
   send(jobs)
   for job in jobs:seen[job['key']]={'url':job['url'],'date':str(today)}

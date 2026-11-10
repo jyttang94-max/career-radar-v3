@@ -1,7 +1,6 @@
 name: Career Radar V3 Daily
 on:
-  schedule:
-    - cron: '0 23 * * *' # 08:00 KST
+  # V13 is the sole scheduled collector; this entry is manual only.
   workflow_dispatch:
     inputs:
       mode:
@@ -25,6 +24,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
+      - name: Check syntax
+        run: python -m py_compile career_radar_v3.py career_radar_v13.py
       - name: Search and notify
         env:
           RADAR_MODE: ${{ github.event_name == 'schedule' && 'live' || inputs.mode }}
