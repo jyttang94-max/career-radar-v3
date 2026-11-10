@@ -132,10 +132,25 @@ def main():
   if health!='ok':raise RuntimeError('Collection incomplete: '+health+'; inspect career_radar_report.json')
   return
  if health!='ok':raise RuntimeError('Collection incomplete: '+health+'; notification withheld; inspect career_radar_report.json')
+ pending_path=Path('data/pending_jobs.json')
+ pending=json.loads(pending_path.read_text()) if pending_path.exists() else {}
+ for job in jobs:pending[job['key']]=job
+ pending={key:job for key,job in pending.items() if key not in seen and job['deadline']>=today.isoformat()}
+ pending_path.parent.mkdir(exist_ok=True)
+ pending_path.write_text(json.dumps(pending,ensure_ascii=False,indent=2),encoding='utf-8')
+ if mode=='collect_only' or today.weekday() not in (1,3):
+  print('COLLECT_ONLY',len(pending));return
+ # Recheck pending original pages before including them in the digest.
+ jobs=[]
+ for key,job in pending.items():
+  refreshed=extract(job['url'],job['job'])
+  if refreshed:refreshed['key']=key;jobs.append(refreshed)
  if jobs:
   send(jobs)
   for job in jobs:seen[job['key']]={'url':job['url'],'date':str(today)}
   STATE.write_text(json.dumps(seen,ensure_ascii=False,indent=2),encoding='utf-8')
+  for job in jobs:pending.pop(job['key'],None)
+  pending_path.write_text(json.dumps(pending,ensure_ascii=False,indent=2),encoding='utf-8')
   print('SENT',len(jobs))
  else:print('NO_NEW_JOBS')
 if __name__=='__main__':main()

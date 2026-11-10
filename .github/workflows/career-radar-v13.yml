@@ -42,7 +42,7 @@ jobs:
 
       - name: Search and notify
         env:
-          RADAR_MODE: ${{ github.event_name == 'schedule' && 'live' || inputs.mode }}
+          RADAR_MODE: ${{ github.event_name == 'schedule' && 'collect_only' || inputs.mode }}
           NAVER_MAIL_USER: ${{ secrets.NAVER_MAIL_USER }}
           NAVER_MAIL_PASSWORD: ${{ secrets.NAVER_MAIL_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
@@ -62,9 +62,11 @@ jobs:
       - name: Commit sent history
         if: success() && (github.event_name == 'schedule' || inputs.mode == 'live')
         run: |
-          if [ -f data/seen_jobs.json ]; then
+          if [ -f data/seen_jobs.json ] || [ -f data/pending_jobs.json ]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add data/seen_jobs.json
+            for file in data/seen_jobs.json data/pending_jobs.json; do
+              [ ! -f "$file" ] || git add "$file"
+            done
             git diff --cached --quiet || (git commit -m 'Update V13 sent jobs' && git push)
           fi
